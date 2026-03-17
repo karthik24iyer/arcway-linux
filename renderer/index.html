@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #1e1e2e;
+    color: #cdd6f4;
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+    width: 260px;
+    overflow: hidden;
+    -webkit-app-region: no-drag;
+    user-select: none;
+  }
+  .view { display: none; padding: 16px; }
+  .view.active { display: block; }
+  h1 { font-size: 14px; font-weight: 600; color: #cdd6f4; }
+  .row { display: flex; align-items: center; gap: 6px; }
+  .muted { color: #6c7086; font-size: 11px; }
+  .red { color: #f38ba8; font-size: 11px; }
+  hr { border: none; border-top: 1px solid #313244; margin: 10px 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #a6e3a1; flex-shrink: 0; }
+  .subtitle { font-size: 12px; color: #a6adc8; margin-top: 4px; }
+
+  button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    color: #cdd6f4;
+    padding: 0;
+    text-align: left;
+  }
+  button:hover { color: #fff; }
+  .btn-primary {
+    background: #89b4fa;
+    color: #1e1e2e;
+    border-radius: 6px;
+    padding: 7px 14px;
+    font-weight: 600;
+    width: 100%;
+    text-align: center;
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 34px;
+  }
+  .btn-primary:hover { background: #b4d0ff; color: #1e1e2e; }
+  .btn-primary:disabled { opacity: 0.5; cursor: default; }
+  .btn-danger { color: #f38ba8; }
+  .btn-danger:hover { color: #ff9cb0; }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2px 0;
+  }
+  .toggle {
+    position: relative;
+    width: 32px;
+    height: 18px;
+    flex-shrink: 0;
+  }
+  .toggle input { display: none; }
+  .toggle-track {
+    position: absolute;
+    inset: 0;
+    background: #313244;
+    border-radius: 9px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .toggle input:checked + .toggle-track { background: #89b4fa; }
+  .toggle-thumb {
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 14px; height: 14px;
+    background: #cdd6f4;
+    border-radius: 50%;
+    transition: left 0.15s;
+    pointer-events: none;
+  }
+  .toggle input:checked ~ .toggle-thumb { left: 16px; }
+
+  .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid #45475a;
+    border-top-color: #89b4fa;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .section { display: flex; flex-direction: column; gap: 8px; }
+  .actions { display: flex; flex-direction: column; gap: 6px; }
+</style>
+</head>
+<body>
+
+<!-- loggedOut -->
+<div id="view-loggedOut" class="view">
+  <div class="section">
+    <h1>Arcway</h1>
+    <button class="btn-primary" id="btn-login" onclick="doLogin()">Login with Google</button>
+  </div>
+</div>
+
+<!-- connecting -->
+<div id="view-connecting" class="view">
+  <div class="section">
+    <h1>Arcway</h1>
+    <div class="row">
+      <div class="spinner"></div>
+      <span class="muted">Connecting...</span>
+    </div>
+    <div class="actions">
+      <button onclick="window.api.quit()">Quit</button>
+    </div>
+  </div>
+</div>
+
+<!-- connected -->
+<div id="view-connected" class="view">
+  <div class="section">
+    <div class="row">
+      <div class="dot"></div>
+      <h1>Arcway</h1>
+    </div>
+    <div class="subtitle">Hello, <span id="user-name"></span></div>
+    <span class="muted">Connected</span>
+    <hr>
+    <label class="toggle-row">
+      <span>Launch at login</span>
+      <div class="toggle">
+        <input type="checkbox" id="toggle-autostart" onchange="window.api.setAutostart(this.checked)">
+        <div class="toggle-track"></div>
+        <div class="toggle-thumb"></div>
+      </div>
+    </label>
+    <label class="toggle-row">
+      <span>Keep System Awake</span>
+      <div class="toggle">
+        <input type="checkbox" id="toggle-keepawake" onchange="window.api.setKeepAwake(this.checked)">
+        <div class="toggle-track"></div>
+        <div class="toggle-thumb"></div>
+      </div>
+    </label>
+    <hr>
+    <div class="actions">
+      <button onclick="window.api.retry()">Reconnect</button>
+      <button class="btn-danger" onclick="window.api.logout()">Logout</button>
+      <button onclick="window.api.quit()">Quit</button>
+    </div>
+  </div>
+</div>
+
+<!-- error -->
+<div id="view-error" class="view">
+  <div class="section">
+    <h1>Arcway</h1>
+    <span id="error-msg" class="red"></span>
+    <div class="actions">
+      <button class="btn-primary" onclick="window.api.retry()">Retry</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const views = ['loggedOut', 'connecting', 'connected', 'error'];
+
+  function show(type) {
+    views.forEach(v => {
+      document.getElementById('view-' + v).classList.toggle('active', v === type);
+    });
+  }
+
+  window.api.onState((state) => {
+    show(state.type);
+    if (state.type === 'connected') {
+      document.getElementById('user-name').textContent = state.userName || '';
+    }
+    if (state.type === 'error') {
+      document.getElementById('error-msg').textContent = state.message || 'Unknown error';
+    }
+  });
+
+  function doLogin() {
+    const btn = document.getElementById('btn-login');
+    btn.disabled = true;
+    btn.innerHTML = '<div class="spinner"></div>';
+    window.api.login().finally(() => {
+      btn.disabled = false;
+      btn.innerHTML = 'Login with Google';
+    });
+  }
+</script>
+</body>
+</html>

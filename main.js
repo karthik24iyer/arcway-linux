@@ -5,13 +5,13 @@ const os = require('os');
 const auth = require('./src/auth');
 const agent = require('./src/agent');
 const credentials = require('./src/credentials');
+const config = require('./src/config');
 
 let win, tray;
 let psbId = null;
 let currentState = { type: 'loggedOut' };
 
-// Heights per state so window sizes to content
-const STATE_HEIGHTS = { loggedOut: 130, connecting: 110, connected: 300, error: 140 };
+const STATE_HEIGHTS = { loggedOut: 130, connecting: 110, installing: 120, connected: 355, error: 140 };
 
 function sendState(stateObj) {
   currentState = stateObj;
@@ -59,9 +59,47 @@ function positionWindow() {
   win.setPosition(x, y);
 }
 
+async function setupBackend() {
+  if (!app.isPackaged) return path.join(__dirname, '../arcway-backend');
+
+  const userBackend = path.join(app.getPath('userData'), 'backend');
+  const bundledBackend = path.join(process.resourcesPath, 'backend');
+
+  if (!fs.existsSync(path.join(userBackend, 'src'))) {
+    fs.mkdirSync(userBackend, { recursive: true });
+    copyDirSync(bundledBackend, userBackend);
+  }
+
+  if (!fs.existsSync(path.join(userBackend, 'node_modules'))) {
+    sendState({ type: 'installing', message: 'Setting up Arcway (first run)...' });
+    await new Promise((resolve, reject) => {
+      const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+      const proc = require('child_process').spawn(npm, ['install', '--production', '--no-audit'], {
+        cwd: userBackend,
+        env: { ...process.env, HOME: os.homedir() },
+      });
+      proc.on('exit', (code) => code === 0 ? resolve() : reject(new Error('npm install failed (exit ' + code + ')')));
+    });
+  }
+
+  return userBackend;
+}
+
+function copyDirSync(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, entry.name), d = path.join(dest, entry.name);
+    if (entry.isDirectory()) copyDirSync(s, d);
+    else fs.copyFileSync(s, d);
+  }
+}
+
 agent.on('connecting', () => sendState({ type: 'connecting' }));
 agent.on('connected', (userName) => sendState({ type: 'connected', userName }));
 agent.on('disconnected', () => sendState({ type: 'connecting' }));
+agent.on('installing', (message) => sendState({ type: 'installing', message }));
+agent.on('loggedOut', () => sendState({ type: 'loggedOut' }));
+agent.on('error', (message) => sendState({ type: 'error', message }));
 
 app.whenReady().then(() => {
   tray = new Tray(nativeImage.createFromPath(path.join(__dirname, 'assets/tray.svg')));
@@ -114,8 +152,13 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('retry', () => {
-    sendState({ type: 'connecting' });
-    agent.start();
+    agent.stop();
+    agent.startIfCredentialed();
+  });
+
+  ipcMain.handle('get-autostart', () => {
+    const desktopPath = path.join(os.homedir(), '.config/autostart/arcway.desktop');
+    return fs.existsSync(desktopPath);
   });
 
   ipcMain.handle('set-autostart', (_, enabled) => {
@@ -144,6 +187,23 @@ app.whenReady().then(() => {
     }
   });
 
+  ipcMain.handle('get-relay-url', () => config.getRelayUrl());
+
+  ipcMain.handle('set-relay-url', (_, url) => {
+    config.setRelayUrl(url);
+    agent.stop();
+    agent.startIfCredentialed();
+  });
+
+  ipcMain.handle('check-file-access', () => {
+    try { fs.readdirSync(os.homedir()); return true; }
+    catch (_) { return false; }
+  });
+
+  ipcMain.handle('resize', (_, height) => {
+    if (win && !win.isDestroyed()) win.setContentSize(260, height);
+  });
+
   ipcMain.handle('quit', () => app.quit());
 
   powerMonitor.on('resume', () => {
@@ -153,10 +213,15 @@ app.whenReady().then(() => {
 
   app.on('before-quit', () => agent.stop());
 
-  if (credentials.load('device_credential')) {
-    sendState({ type: 'connecting' });
-    agent.startIfCredentialed();
-  }
+  setupBackend().then((backendPath) => {
+    agent.setBackendPath(backendPath);
+    if (credentials.load('device_credential')) {
+      sendState({ type: 'connecting' });
+      agent.startIfCredentialed();
+    }
+  }).catch((err) => {
+    sendState({ type: 'error', message: `Setup failed: ${err.message}\nEnsure Node.js and npm are installed.` });
+  });
 });
 
 app.on('window-all-closed', () => {});

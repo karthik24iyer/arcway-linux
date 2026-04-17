@@ -3,9 +3,9 @@ const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
 const credentials = require('./credentials');
+const config = require('./config');
 
 const LINUX_CLIENT_ID = 'YOUR_LINUX_CLIENT_ID.apps.googleusercontent.com'; // TODO: replace with Desktop app OAuth client ID
-const RELAY_HTTP_URL = 'https://claude-relay-server.duckdns.org';
 
 async function login() {
   const verifier = crypto.randomBytes(32).toString('base64url');
@@ -45,8 +45,9 @@ async function login() {
   const { sessionToken, email } = await authenticateWithRelay(idToken);
   credentials.save('session_token', sessionToken);
   credentials.save('user_email', email);
-  const deviceCredential = await registerDevice(sessionToken);
+  const { deviceCredential, deviceId } = await registerDevice(sessionToken);
   credentials.save('device_credential', deviceCredential);
+  credentials.save('device_id', deviceId);
 }
 
 function logout() {
@@ -71,7 +72,7 @@ async function exchangeCode(code, verifier, redirectUri) {
     grant_type: 'authorization_code',
   }).toString();
 
-  const json = await httpsPost('https://oauth2.googleapis.com/token', body, {
+  const json = await httpPost('https://oauth2.googleapis.com/token', body, {
     'Content-Type': 'application/x-www-form-urlencoded',
   });
 
@@ -80,33 +81,36 @@ async function exchangeCode(code, verifier, redirectUri) {
 }
 
 async function authenticateWithRelay(idToken) {
-  const json = await httpsPost(`${RELAY_HTTP_URL}/auth/google`, JSON.stringify({ id_token: idToken }), {
+  const relayUrl = config.getRelayUrl();
+  const json = await httpPost(`${relayUrl}/auth/google`, JSON.stringify({ id_token: idToken }), {
     'Content-Type': 'application/json',
   });
   if (!json.session_token) throw new Error('Relay authentication failed');
-  const email = decodeEmailFromJWT(json.session_token) || 'unknown';
+  const email = json.email || decodeEmailFromJWT(json.session_token) || 'unknown';
   return { sessionToken: json.session_token, email };
 }
 
 async function registerDevice(sessionToken) {
-  const json = await httpsPost(
-    `${RELAY_HTTP_URL}/api/devices/register`,
+  const relayUrl = config.getRelayUrl();
+  const json = await httpPost(
+    `${relayUrl}/api/devices/register`,
     JSON.stringify({ name: require('os').hostname() }),
     { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionToken}` }
   );
-  if (!json.device_credential) throw new Error('Device registration failed');
-  return json.device_credential;
+  if (!json.device_credential || !json.device_id) throw new Error('Device registration failed');
+  return { deviceCredential: json.device_credential, deviceId: json.device_id };
 }
 
-function httpsPost(url, body, headers) {
+function httpPost(url, body, headers) {
   return new Promise((resolve, reject) => {
-    const data = body;
     const urlObj = new URL(url);
-    const req = https.request({
+    const transport = urlObj.protocol === 'https:' ? https : http;
+    const req = transport.request({
       hostname: urlObj.hostname,
+      port: urlObj.port || undefined,
       path: urlObj.pathname + urlObj.search,
       method: 'POST',
-      headers: { ...headers, 'Content-Length': Buffer.byteLength(data) },
+      headers: { ...headers, 'Content-Length': Buffer.byteLength(body) },
     }, (res) => {
       let chunks = '';
       res.on('data', c => chunks += c);
@@ -116,7 +120,7 @@ function httpsPost(url, body, headers) {
       });
     });
     req.on('error', reject);
-    req.write(data);
+    req.write(body);
     req.end();
   });
 }

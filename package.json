@@ -1,12 +1,51 @@
 {
   "name": "arcway-linux",
   "version": "1.0.0",
+  "description": "Arcway remote desktop tray app",
+  "author": "Arcway",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "build": "electron-builder --linux --x64"
   },
   "dependencies": {
-    "@napi-rs/keyring": "^1.1.5",
-    "electron": "^30.0.0"
+    "@napi-rs/keyring": "^1.1.5"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^26.8.1"
+  },
+  "optionalDependencies": {
+    "@napi-rs/keyring-linux-x64-gnu": "^1.2.0"
+  },
+  "build": {
+    "appId": "com.arcway.app",
+    "productName": "Arcway",
+    "npmRebuild": false,
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**",
+      "src/**",
+      "assets/**",
+      "node_modules/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../arcway-backend",
+        "to": "backend",
+        "filter": ["src/**", "package.json", "package-lock.json"]
+      }
+    ],
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "icon": "assets/icon.png",
+      "category": "Utility",
+      "executableName": "arcway"
+    },
+    "deb": {
+      "maintainer": "Arcway <app@arcway.local>",
+      "depends": ["libsecret-1-0", "nodejs", "npm"]
+    }
   }
 }

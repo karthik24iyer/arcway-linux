@@ -19,9 +19,11 @@
   h1 { font-size: 14px; font-weight: 600; color: #cdd6f4; }
   .row { display: flex; align-items: center; gap: 6px; }
   .muted { color: #6c7086; font-size: 11px; }
-  .red { color: #f38ba8; font-size: 11px; }
+  .red { color: #f38ba8; font-size: 11px; white-space: pre-line; }
   hr { border: none; border-top: 1px solid #313244; margin: 10px 0; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #a6e3a1; flex-shrink: 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dot-green { background: #a6e3a1; }
+  .dot-orange { background: #fab387; }
   .subtitle { font-size: 12px; color: #a6adc8; margin-top: 4px; }
 
   button {
@@ -54,6 +56,8 @@
   .btn-primary:disabled { opacity: 0.5; cursor: default; }
   .btn-danger { color: #f38ba8; }
   .btn-danger:hover { color: #ff9cb0; }
+  .btn-accent { color: #89b4fa; }
+  .btn-accent:hover { color: #b4d0ff; }
 
   .toggle-row {
     display: flex;
@@ -100,6 +104,39 @@
 
   .section { display: flex; flex-direction: column; gap: 8px; }
   .actions { display: flex; flex-direction: column; gap: 6px; }
+
+  .access-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  .access-icon { font-size: 13px; line-height: 1; }
+  .access-granted { color: #a6e3a1; }
+  .access-denied { color: #fab387; }
+
+  .settings-panel { display: flex; flex-direction: column; gap: 6px; padding: 6px 0 2px; }
+  .settings-label { font-size: 11px; color: #6c7086; }
+  .settings-input {
+    background: #313244;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    color: #cdd6f4;
+    font-size: 11px;
+    font-family: inherit;
+    padding: 5px 8px;
+    width: 100%;
+    outline: none;
+  }
+  .settings-input:focus { border-color: #89b4fa; }
+  .settings-btns { display: flex; gap: 6px; }
+  .btn-sm {
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid #45475a;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .btn-sm-primary { background: #89b4fa; color: #1e1e2e; border-color: #89b4fa; font-weight: 600; }
+  .btn-sm-primary:hover { background: #b4d0ff; }
+  .btn-sm-ghost { background: none; color: #cdd6f4; }
+  .btn-sm-ghost:hover { background: #313244; }
 </style>
 </head>
 <body>
@@ -126,11 +163,25 @@
   </div>
 </div>
 
+<!-- installing -->
+<div id="view-installing" class="view">
+  <div class="section">
+    <h1>Arcway</h1>
+    <div class="row">
+      <div class="spinner"></div>
+      <span class="muted" id="installing-msg">Installing...</span>
+    </div>
+    <div class="actions">
+      <button onclick="window.api.quit()">Quit</button>
+    </div>
+  </div>
+</div>
+
 <!-- connected -->
 <div id="view-connected" class="view">
   <div class="section">
     <div class="row">
-      <div class="dot"></div>
+      <div class="dot dot-green" id="status-dot"></div>
       <h1>Arcway</h1>
     </div>
     <div class="subtitle">Hello, <span id="user-name"></span></div>
@@ -152,6 +203,20 @@
         <div class="toggle-thumb"></div>
       </div>
     </label>
+    <div class="access-row" id="access-row">
+      <span class="access-icon access-granted" id="access-icon">✓</span>
+      <span id="access-label">File access granted</span>
+    </div>
+    <hr>
+    <button class="btn-accent" onclick="toggleSettings()">Settings</button>
+    <div class="settings-panel" id="settings-panel" style="display:none">
+      <span class="settings-label">Relay Server URL</span>
+      <input class="settings-input" id="relay-url-input" type="text" placeholder="https://your-relay.example.com">
+      <div class="settings-btns">
+        <button class="btn-sm btn-sm-primary" onclick="saveRelayUrl()">Save & Reconnect</button>
+        <button class="btn-sm btn-sm-ghost" onclick="resetRelayUrl()">Reset</button>
+      </div>
+    </div>
     <hr>
     <div class="actions">
       <button onclick="window.api.retry()">Reconnect</button>
@@ -173,7 +238,10 @@
 </div>
 
 <script>
-  const views = ['loggedOut', 'connecting', 'connected', 'error'];
+  const views = ['loggedOut', 'connecting', 'installing', 'connected', 'error'];
+  const HEIGHT_CONNECTED = 355;
+  const HEIGHT_CONNECTED_SETTINGS = 455;
+  let settingsOpen = false;
 
   function show(type) {
     views.forEach(v => {
@@ -181,15 +249,61 @@
     });
   }
 
-  window.api.onState((state) => {
+  window.api.onState(async (state) => {
     show(state.type);
     if (state.type === 'connected') {
       document.getElementById('user-name').textContent = state.userName || '';
+      const hasAccess = await window.api.checkFileAccess();
+      const dot = document.getElementById('status-dot');
+      const icon = document.getElementById('access-icon');
+      const label = document.getElementById('access-label');
+      dot.className = 'dot ' + (hasAccess ? 'dot-green' : 'dot-orange');
+      icon.className = 'access-icon ' + (hasAccess ? 'access-granted' : 'access-denied');
+      icon.textContent = hasAccess ? '✓' : '⚠';
+      label.textContent = hasAccess ? 'File access granted' : 'File access limited';
+
+      const url = await window.api.getRelayUrl();
+      document.getElementById('relay-url-input').value = url;
+
+      const autostartEnabled = await window.api.getAutostart();
+      document.getElementById('toggle-autostart').checked = autostartEnabled;
+
+      if (settingsOpen) {
+        settingsOpen = false;
+        document.getElementById('settings-panel').style.display = 'none';
+        window.api.resize(HEIGHT_CONNECTED);
+      }
+    }
+    if (state.type === 'installing') {
+      document.getElementById('installing-msg').textContent = state.message || 'Installing...';
     }
     if (state.type === 'error') {
       document.getElementById('error-msg').textContent = state.message || 'Unknown error';
     }
   });
+
+  function toggleSettings() {
+    settingsOpen = !settingsOpen;
+    document.getElementById('settings-panel').style.display = settingsOpen ? 'flex' : 'none';
+    window.api.resize(settingsOpen ? HEIGHT_CONNECTED_SETTINGS : HEIGHT_CONNECTED);
+  }
+
+  function saveRelayUrl() {
+    const url = document.getElementById('relay-url-input').value.trim();
+    settingsOpen = false;
+    document.getElementById('settings-panel').style.display = 'none';
+    window.api.resize(HEIGHT_CONNECTED);
+    window.api.setRelayUrl(url);
+  }
+
+  function resetRelayUrl() {
+    const def = 'https://claude-relay-server.duckdns.org';
+    document.getElementById('relay-url-input').value = def;
+    settingsOpen = false;
+    document.getElementById('settings-panel').style.display = 'none';
+    window.api.resize(HEIGHT_CONNECTED);
+    window.api.setRelayUrl(def);
+  }
 
   function doLogin() {
     const btn = document.getElementById('btn-login');

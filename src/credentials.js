@@ -1,7 +1,7 @@
 const { Keyring } = require('@napi-rs/keyring');
 
 const keyring = new Keyring('arcway-linux');
-const KEYS = ['session_token', 'device_credential', 'user_email'];
+const KEYS = ['session_token', 'device_credential', 'device_id', 'user_email'];
 
 function save(key, value) {
   keyring.setPassword(key, value);

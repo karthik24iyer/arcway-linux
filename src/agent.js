@@ -2,13 +2,16 @@ const { EventEmitter } = require('events');
 const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const credentials = require('./credentials');
+const config = require('./config');
 
 const emitter = new EventEmitter();
-const backendPath = path.join(__dirname, '../../arcway-backend');
-const serverScript = path.join(backendPath, 'src/server.js');
+let backendPath = path.join(__dirname, '../../arcway-backend');
 
 let proc = null;
 let stopped = false;
+let generation = 0;
+
+function setBackendPath(p) { backendPath = p; }
 
 function getShellEnv() {
   const shell = process.env.SHELL || '/bin/bash';
@@ -29,13 +32,20 @@ function getShellEnv() {
 
 function start() {
   stopped = false;
+  const myGeneration = generation;
   const credential = credentials.load('device_credential') || '';
+  const httpUrl = config.getRelayUrl();
+  const wsUrl = httpUrl.replace(/^https:\/\//, 'wss://').replace(/^http:\/\//, 'ws://');
+
   const env = {
     ...getShellEnv(),
-    RELAY_URL: 'wss://claude-relay-server.duckdns.org',
+    RELAY_URL: wsUrl,
     DEVICE_CREDENTIAL: credential,
   };
+  const deviceId = credentials.load('device_id');
+  if (deviceId) env.DEVICE_ID = deviceId;
 
+  const serverScript = path.join(backendPath, 'src/server.js');
   proc = spawn('node', [serverScript], { env, cwd: backendPath });
 
   let buffer = '';
@@ -45,26 +55,54 @@ function start() {
     buffer = lines.pop();
     for (const line of lines) {
       const trimmed = line.trim();
-      if (trimmed === 'STATUS:connected') {
-        const email = credentials.load('user_email') || '';
-        const name = email.split('@')[0] || 'there';
-        emitter.emit('connected', name || 'there');
-      } else if (trimmed === 'STATUS:disconnected') {
-        emitter.emit('disconnected');
+      if (!trimmed) continue;
+      switch (trimmed) {
+        case 'STATUS:connected': {
+          const email = credentials.load('user_email') || '';
+          const name = email.split('@')[0] || 'there';
+          emitter.emit('connected', name || 'there');
+          break;
+        }
+        case 'STATUS:disconnected':
+          emitter.emit('disconnected');
+          break;
+        case 'STATUS:invalid_credential':
+          stopped = true;
+          generation++;
+          if (proc) { proc.kill(); proc = null; }
+          credentials.clearAll();
+          emitter.emit('loggedOut');
+          break;
+        case 'STATUS:tmux_not_found':
+          emitter.emit('installing', 'tmux not found, installing...');
+          break;
+        case 'STATUS:tmux_installing':
+          emitter.emit('installing', 'Installing tmux...');
+          break;
+        case 'STATUS:tmux_ready':
+          emitter.emit('connecting');
+          break;
+        case 'STATUS:error:tmux_no_brew':
+          stopped = true;
+          emitter.emit('error', 'tmux is required but not installed.\nPlease install it manually:\n  sudo apt install tmux\nthen relaunch Arcway.');
+          break;
+        case 'STATUS:error:tmux_install_failed':
+          stopped = true;
+          emitter.emit('error', 'Failed to install tmux automatically.\nPlease install it manually:\n  sudo apt install tmux\nthen relaunch Arcway.');
+          break;
       }
     }
   });
 
-  proc.stderr.on('data', () => {});
+  proc.stderr.on('data', (d) => process.stderr.write(d));
 
   proc.on('exit', () => {
     proc = null;
-    if (!stopped) {
-      emitter.emit('disconnected');
-      setTimeout(() => {
-        if (!stopped) start();
-      }, 5000);
-    }
+    if (stopped || myGeneration !== generation) return;
+    emitter.emit('disconnected');
+    setTimeout(() => {
+      if (!stopped && myGeneration === generation) start();
+    }, 5000);
   });
 }
 
@@ -76,10 +114,11 @@ function startIfCredentialed() {
 
 function stop() {
   stopped = true;
+  generation++;
   if (proc) {
     proc.kill();
     proc = null;
   }
 }
 
-module.exports = { start, startIfCredentialed, stop, on: emitter.on.bind(emitter) };
+module.exports = { start, startIfCredentialed, stop, setBackendPath, on: emitter.on.bind(emitter) };

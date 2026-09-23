@@ -98,7 +98,7 @@ async function registerDevice(sessionToken) {
     { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionToken}` }
   );
   if (json.error === 'Device limit reached') {
-    throw new Error('Free accounts can pair one host. Become a BOUFie (Buy Once Use Forever) in the Arcway phone app, then try again.');
+    throw new Error('Free accounts can pair one host. Upgrade to Pro in the Arcway phone app, then try again.');
   }
   if (!json.device_credential || !json.device_id) throw new Error('Device registration failed');
   return { deviceCredential: json.device_credential, deviceId: json.device_id };

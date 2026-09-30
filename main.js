@@ -1,227 +1,232 @@
-const { app, BrowserWindow, Tray, ipcMain, screen, powerMonitor, powerSaveBlocker, nativeImage } = require('electron');
-const path = require('path');
+// Linux port of arcway-mac (ClaudeRemoteApp + PopoverView). Keep behaviour 1:1 with the Mac app.
+const { app, BrowserWindow, Tray, Menu, ipcMain, screen, powerMonitor, powerSaveBlocker, nativeImage, nativeTheme, net, shell, dialog } = require('electron');
+const { execFile } = require('child_process');
 const fs = require('fs');
 const os = require('os');
+const path = require('path');
 const auth = require('./src/auth');
 const agent = require('./src/agent');
-const credentials = require('./src/credentials');
-const config = require('./src/config');
+const runtime = require('./src/runtime');
+const { settings, DEFAULT_RELAY_URL } = require('./src/store');
+
+const RELEASES_API = 'https://api.github.com/repos/karthik24iyer/arcway-relay-server/releases/latest';
+const WIDTH = 272; // Mac popover: 240 content + 16 padding each side
+
+if (!app.requestSingleInstanceLock()) app.exit(0);
 
 let win, tray;
-let psbId = null;
-let currentState = { type: 'loggedOut' };
+let keepAwakeId = null;
+let state = { type: 'loggedOut', phoneConnected: false, phoneName: null };
 
-const STATE_HEIGHTS = { loggedOut: 130, connecting: 110, installing: 120, connected: 355, error: 140 };
-
-function sendState(stateObj) {
-  currentState = stateObj;
-  updateTrayIcon(stateObj.type === 'connected');
-  if (win && !win.isDestroyed()) {
-    const h = STATE_HEIGHTS[stateObj.type] || 200;
-    win.setContentSize(260, h);
-    win.webContents.send('state', stateObj);
-  }
+function setState(patch) {
+  state = { ...state, ...patch };
+  updateIcon();
+  if (win && !win.isDestroyed()) win.webContents.send('state', state);
 }
+agent.init(() => state, setState);
 
-function updateTrayIcon(connected) {
+// Mac: green = phone connected, dark orange = connected without a phone, plain = not connected.
+function updateIcon() {
   if (!tray) return;
-  if (connected) {
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 22" width="22" height="22">
-      <rect x="2" y="3" width="18" height="13" rx="2" fill="none" stroke="black" stroke-width="1.5"/>
-      <line x1="7" y1="20" x2="15" y2="20" stroke="black" stroke-width="1.5"/>
-      <line x1="11" y1="16" x2="11" y2="20" stroke="black" stroke-width="1.5"/>
-      <circle cx="18" cy="18" r="4" fill="#22c55e"/>
-    </svg>`;
-    tray.setImage(nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`));
-  } else {
-    tray.setImage(nativeImage.createFromPath(path.join(__dirname, 'assets/tray.svg')));
+  const theme = nativeTheme.shouldUseDarkColors ? 'light' : 'dark';
+  const dot = state.type !== 'connected' ? '' : state.phoneConnected ? '-phone' : '-nophone';
+  tray.setImage(nativeImage.createFromPath(path.join(__dirname, `assets/tray/${theme}${dot}.png`)));
+}
+
+// ── Desktop integration ────────────────────────────────────────────────────
+
+function execLine() {
+  const exe = process.env.APPIMAGE || process.execPath;
+  return app.isPackaged ? `"${exe}"` : `"${exe}" "${app.getAppPath()}"`;
+}
+
+const AUTOSTART = path.join(os.homedir(), '.config/autostart/arcway.desktop');
+const launchAtLogin = () => fs.existsSync(AUTOSTART);
+
+function setLaunchAtLogin(enabled) {
+  if (!enabled) return fs.rmSync(AUTOSTART, { force: true });
+  fs.mkdirSync(path.dirname(AUTOSTART), { recursive: true });
+  fs.writeFileSync(AUTOSTART, `[Desktop Entry]\nType=Application\nName=Arcway\nExec=${execLine()}\nIcon=arcway-desktop\nX-GNOME-Autostart-enabled=true\n`);
+}
+
+// OAuth callbacks (Google's custom scheme, arcway-auth for Apple) come back as a second
+// instance whose argv holds the URL. Rewritten every launch because AppImage paths move.
+function registerSchemes() {
+  const dir = path.join(os.homedir(), '.local/share/applications');
+  const mimes = auth.SCHEMES.map((s) => `x-scheme-handler/${s}`);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'arcway-auth.desktop'),
+      `[Desktop Entry]\nType=Application\nName=Arcway\nExec=${execLine()} %u\nNoDisplay=true\nMimeType=${mimes.join(';')};\n`);
+    execFile('xdg-mime', ['default', 'arcway-auth.desktop', ...mimes], () => {});
+    execFile('update-desktop-database', [dir], () => {});
+  } catch {}
+}
+
+function handleArgv(argv) {
+  const url = argv.find((a) => auth.SCHEMES.some((s) => a.startsWith(`${s}:`)));
+  if (url) auth.handleCallback(url);
+}
+
+// Mac `caffeinate -dims` equivalent.
+function applyKeepAwake(enabled) {
+  if (enabled && keepAwakeId === null) keepAwakeId = powerSaveBlocker.start('prevent-display-sleep');
+  if (!enabled && keepAwakeId !== null) { powerSaveBlocker.stop(keepAwakeId); keepAwakeId = null; }
+}
+
+// ── Updates (Sparkle on Mac): same GitHub release feed; the user downloads the new build. ──
+
+const newer = (a, b) => {
+  const [x, y] = [a, b].map((v) => v.split('.').map(Number));
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
+};
+
+async function checkForUpdates(silent) {
+  try {
+    const release = await (await net.fetch(RELEASES_API)).json();
+    const latest = String(release.tag_name || '').replace(/^v/, '');
+    if (latest && newer(latest, app.getVersion())) {
+      const { response } = await dialog.showMessageBox({
+        type: 'info',
+        message: `Arcway ${latest} is available`,
+        detail: `You have ${app.getVersion()}. Download the new AppImage or .deb from the release page.`,
+        buttons: ['Download', 'Later'],
+      });
+      if (response === 0) shell.openExternal(release.html_url);
+    } else if (!silent) {
+      dialog.showMessageBox({ type: 'info', message: 'You’re up to date!', detail: `Arcway ${app.getVersion()} is the newest version.` });
+    }
+  } catch (err) {
+    if (!silent) dialog.showMessageBox({ type: 'error', message: 'Update check failed', detail: err.message });
   }
 }
+
+// ── Popover window ─────────────────────────────────────────────────────────
 
 function positionWindow() {
   const cursor = screen.getCursorScreenPoint();
-  const display = screen.getDisplayNearestPoint(cursor);
-  const { bounds } = display;
-  const [winW, winH] = win.getSize();
-
-  let x, y;
-  // Wayland fallback: cursor at {0,0}
-  if (cursor.x === 0 && cursor.y === 0) {
-    x = bounds.x + Math.round((bounds.width - winW) / 2);
-    y = bounds.y + bounds.height - winH - 40;
-  } else {
-    x = cursor.x - Math.round(winW / 2);
-    const isLowerHalf = cursor.y > bounds.y + bounds.height / 2;
-    y = isLowerHalf ? cursor.y - winH - 10 : cursor.y + 10;
-    x = Math.max(bounds.x, Math.min(x, bounds.x + bounds.width - winW));
-    y = Math.max(bounds.y, Math.min(y, bounds.y + bounds.height - winH));
+  const { workArea } = screen.getDisplayNearestPoint(cursor);
+  const [w, h] = win.getSize();
+  // Wayland reports the cursor at 0,0: anchor top-right, where most panels keep the tray.
+  let x = workArea.x + workArea.width - w - 8;
+  let y = workArea.y + 8;
+  if (cursor.x || cursor.y) {
+    x = cursor.x - Math.round(w / 2);
+    y = cursor.y > workArea.y + workArea.height / 2 ? cursor.y - h - 10 : cursor.y + 10;
   }
+  x = Math.max(workArea.x, Math.min(x, workArea.x + workArea.width - w));
+  y = Math.max(workArea.y, Math.min(y, workArea.y + workArea.height - h));
   win.setPosition(x, y);
 }
 
-async function setupBackend() {
-  if (!app.isPackaged) return path.join(__dirname, '../arcway-backend');
-
-  const userBackend = path.join(app.getPath('userData'), 'backend');
-  const bundledBackend = path.join(process.resourcesPath, 'backend');
-
-  if (!fs.existsSync(path.join(userBackend, 'src'))) {
-    fs.mkdirSync(userBackend, { recursive: true });
-    copyDirSync(bundledBackend, userBackend);
-  }
-
-  if (!fs.existsSync(path.join(userBackend, 'node_modules'))) {
-    sendState({ type: 'installing', message: 'Setting up Arcway (first run)...' });
-    await new Promise((resolve, reject) => {
-      const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-      const proc = require('child_process').spawn(npm, ['install', '--production', '--no-audit'], {
-        cwd: userBackend,
-        env: { ...process.env, HOME: os.homedir() },
-      });
-      proc.on('exit', (code) => code === 0 ? resolve() : reject(new Error('npm install failed (exit ' + code + ')')));
-    });
-  }
-
-  return userBackend;
+function togglePopover() {
+  if (win.isVisible()) return win.hide();
+  positionWindow();
+  win.show();
+  win.focus();
+  win.webContents.send('shown');
 }
 
-function copyDirSync(src, dest) {
-  fs.mkdirSync(dest, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    const s = path.join(src, entry.name), d = path.join(dest, entry.name);
-    if (entry.isDirectory()) copyDirSync(s, d);
-    else fs.copyFileSync(s, d);
-  }
-}
-
-agent.on('connecting', () => sendState({ type: 'connecting' }));
-agent.on('connected', (userName) => sendState({ type: 'connected', userName }));
-agent.on('disconnected', () => sendState({ type: 'connecting' }));
-agent.on('installing', (message) => sendState({ type: 'installing', message }));
-agent.on('loggedOut', () => sendState({ type: 'loggedOut' }));
-agent.on('error', (message) => sendState({ type: 'error', message }));
-
-app.whenReady().then(() => {
-  tray = new Tray(nativeImage.createFromPath(path.join(__dirname, 'assets/tray.svg')));
-  tray.setToolTip('Arcway');
-
+function createWindow() {
   win = new BrowserWindow({
-    width: 260,
-    height: 130,
+    width: WIDTH,
+    height: 160,
     frame: false,
     skipTaskbar: true,
     alwaysOnTop: true,
     resizable: false,
     show: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#1e1e1e' : '#ececec',
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
+  });
+  win.loadFile(path.join(__dirname, 'renderer/index.html'));
+  win.webContents.on('did-finish-load', () => win.webContents.send('state', state));
+  win.on('blur', () => win.hide()); // NSPopover .transient
+}
+
+function finishLogin() {
+  setState({ type: 'connecting' });
+  agent.start();
+}
+
+async function login(fn) {
+  try {
+    await fn();
+    finishLogin();
+    return null;
+  } catch (err) {
+    return err instanceof auth.CancelledError ? null : err.message;
+  }
+}
+
+function registerIpc() {
+  const handlers = {
+    'login-google': () => login(auth.loginWithGoogle),
+    'login-apple': () => login(auth.loginWithApple),
+    'pair': () => login(auth.pair),
+    'fetch-pair-code': () => auth.fetchPairCode().catch(() => null),
+    'logout': () => { agent.stop(); auth.logout(); setState({ type: 'loggedOut' }); },
+    'reconnect': () => { agent.stop(); agent.startIfCredentialed(); },
+    'retry-offline': () => { setState({ type: 'connecting' }); agent.start('networkOffline'); },
+    'retry': () => agent.start(),
+    'check-updates': () => checkForUpdates(false),
+    'quit': () => app.quit(),
+    'resize': (height) => win.setContentSize(WIDTH, Math.ceil(height)),
+    'get-settings': () => ({
+      launchAtLogin: launchAtLogin(),
+      keepAwake: !!settings.get('keepAwake'),
+      selfHost: !!settings.get('selfHost'),
+      relayUrl: settings.get('relayUrl') ?? DEFAULT_RELAY_URL,
+      shellHook: runtime.hookEnabled(),
+      shellRc: path.basename(runtime.rcPath()),
+      cliInstalled: runtime.installCLI(),
+    }),
+    'set-setting': (key, value) => {
+      if (key === 'launchAtLogin') setLaunchAtLogin(value);
+      else if (key === 'keepAwake') { settings.set('keepAwake', value); applyKeepAwake(value); }
+      else if (key === 'shellHook') return runtime.setHook(value) ? value : runtime.hookEnabled();
+      else if (key === 'selfHost' || key === 'relayUrl') settings.set(key, value);
+      return value;
     },
-  });
+    'install-cli': () => runtime.installCLI(),
+  };
+  for (const [name, fn] of Object.entries(handlers)) ipcMain.handle(name, (_e, ...args) => fn(...args));
+}
 
-  win.loadFile('renderer/index.html');
+app.on('second-instance', (_e, argv) => handleArgv(argv));
 
-  win.webContents.on('did-finish-load', () => sendState(currentState));
+app.whenReady().then(() => {
+  registerIpc();
+  registerSchemes();
+  createWindow();
 
-  win.on('blur', () => win.hide());
+  tray = new Tray(nativeImage.createEmpty());
+  tray.setToolTip('Arcway');
+  tray.on('click', togglePopover);
+  // Many Linux trays (GNOME AppIndicator) only open a menu on click, so offer the popover there too.
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Open Arcway', click: togglePopover },
+    { label: 'Quit', click: () => app.quit() },
+  ]));
+  updateIcon();
+  nativeTheme.on('updated', updateIcon);
 
-  tray.on('click', () => {
-    positionWindow();
-    if (win.isVisible()) {
-      win.hide();
-    } else {
-      win.show();
-      win.focus();
-    }
-  });
-
-  ipcMain.handle('login', async () => {
-    try {
-      sendState({ type: 'connecting' });
-      await auth.login();
-      agent.startIfCredentialed();
-    } catch (e) {
-      sendState({ type: 'error', message: e.message });
-    }
-  });
-
-  ipcMain.handle('logout', () => {
-    agent.stop();
-    auth.logout();
-    sendState({ type: 'loggedOut' });
-  });
-
-  ipcMain.handle('retry', () => {
-    agent.stop();
-    agent.startIfCredentialed();
-  });
-
-  ipcMain.handle('get-autostart', () => {
-    const desktopPath = path.join(os.homedir(), '.config/autostart/arcway.desktop');
-    return fs.existsSync(desktopPath);
-  });
-
-  ipcMain.handle('set-autostart', (_, enabled) => {
-    const desktopPath = path.join(os.homedir(), '.config/autostart/arcway.desktop');
-    if (enabled) {
-      fs.mkdirSync(path.dirname(desktopPath), { recursive: true });
-      fs.writeFileSync(desktopPath, [
-        '[Desktop Entry]',
-        'Type=Application',
-        'Name=Arcway',
-        `Exec=${process.execPath} --hidden`,
-        'Icon=arcway',
-        'X-GNOME-Autostart-enabled=true',
-      ].join('\n'));
-    } else {
-      try { fs.unlinkSync(desktopPath); } catch (_) {}
-    }
-  });
-
-  ipcMain.handle('set-keep-awake', (_, enabled) => {
-    if (enabled) {
-      psbId = powerSaveBlocker.start('prevent-display-sleep');
-    } else if (psbId !== null) {
-      powerSaveBlocker.stop(psbId);
-      psbId = null;
-    }
-  });
-
-  ipcMain.handle('get-relay-url', () => config.getRelayUrl());
-
-  ipcMain.handle('set-relay-url', (_, url) => {
-    config.setRelayUrl(url);
-    agent.stop();
-    agent.startIfCredentialed();
-  });
-
-  ipcMain.handle('check-file-access', () => {
-    try { fs.readdirSync(os.homedir()); return true; }
-    catch (_) { return false; }
-  });
-
-  ipcMain.handle('resize', (_, height) => {
-    if (win && !win.isDestroyed()) win.setContentSize(260, height);
-  });
-
-  ipcMain.handle('quit', () => app.quit());
+  try { runtime.paths(); } catch (err) {
+    setState({ type: 'error', message: `Failed to prepare Arcway: ${err.message}` });
+  }
+  runtime.installCLI();
+  runtime.refreshHook();
+  applyKeepAwake(!!settings.get('keepAwake'));
+  agent.startIfCredentialed();
+  handleArgv(process.argv);
+  if (app.isPackaged) checkForUpdates(true);
 
   powerMonitor.on('resume', () => {
     agent.stop();
     agent.startIfCredentialed();
   });
-
-  app.on('before-quit', () => agent.stop());
-
-  setupBackend().then((backendPath) => {
-    agent.setBackendPath(backendPath);
-    if (credentials.load('device_credential')) {
-      sendState({ type: 'connecting' });
-      agent.startIfCredentialed();
-    }
-  }).catch((err) => {
-    sendState({ type: 'error', message: `Setup failed: ${err.message}\nEnsure Node.js and npm are installed.` });
-  });
 });
 
+app.on('before-quit', () => agent.stop());
 app.on('window-all-closed', () => {});

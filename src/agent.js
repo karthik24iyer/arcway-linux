@@ -1,124 +1,171 @@
-const { EventEmitter } = require('events');
-const { spawn, spawnSync } = require('child_process');
+// Port of arcway-mac AgentService: runs the bundled arcway-backend and maps its STATUS: lines to app state.
+const { spawn, execFile } = require('child_process');
+const fs = require('fs');
 const path = require('path');
-const credentials = require('./credentials');
-const config = require('./config');
+const readline = require('readline');
+const { settings, credentials, relayUrl } = require('./store');
+const runtime = require('./runtime');
 
-const emitter = new EventEmitter();
-let backendPath = path.join(__dirname, '../../arcway-backend');
+const CA_BUNDLES = ['/etc/ssl/certs/ca-certificates.crt', '/etc/pki/tls/certs/ca-bundle.crt', '/etc/ssl/ca-bundle.pem'];
 
 let proc = null;
 let stopped = false;
 let generation = 0;
+let watchdog = null;
+let watchdogFallback = 'loggedOut';
+let getState = () => ({});
+let setState = () => {};
 
-function setBackendPath(p) { backendPath = p; }
-
-function getShellEnv() {
-  const shell = process.env.SHELL || '/bin/bash';
-  const args = shell.endsWith('fish') ? ['-l', '-c', 'env'] : ['-l', '-i', '-c', 'env'];
-  try {
-    const result = spawnSync(shell, args, { encoding: 'utf8', timeout: 5000 });
-    if (result.stdout) {
-      const env = {};
-      for (const line of result.stdout.split('\n')) {
-        const eq = line.indexOf('=');
-        if (eq > 0) env[line.slice(0, eq)] = line.slice(eq + 1);
-      }
-      return { ...process.env, ...env };
-    }
-  } catch (_) {}
-  return process.env;
-}
-
-function start() {
-  stopped = false;
-  const myGeneration = generation;
-  const credential = credentials.load('device_credential') || '';
-  const httpUrl = config.getRelayUrl();
-  const wsUrl = httpUrl.replace(/^https:\/\//, 'wss://').replace(/^http:\/\//, 'ws://');
-
-  const env = {
-    ...getShellEnv(),
-    RELAY_URL: wsUrl,
-    DEVICE_CREDENTIAL: credential,
-  };
-  const deviceId = credentials.load('device_id');
-  if (deviceId) env.DEVICE_ID = deviceId;
-
-  const serverScript = path.join(backendPath, 'src/server.js');
-  proc = spawn('node', [serverScript], { env, cwd: backendPath });
-
-  let buffer = '';
-  proc.stdout.on('data', (data) => {
-    buffer += data.toString();
-    const lines = buffer.split('\n');
-    buffer = lines.pop();
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      switch (trimmed) {
-        case 'STATUS:connected': {
-          const email = credentials.load('user_email') || '';
-          const name = email.split('@')[0] || 'there';
-          emitter.emit('connected', name || 'there');
-          break;
-        }
-        case 'STATUS:disconnected':
-          emitter.emit('disconnected');
-          break;
-        case 'STATUS:invalid_credential':
-          stopped = true;
-          generation++;
-          if (proc) { proc.kill(); proc = null; }
-          credentials.clearAll();
-          emitter.emit('loggedOut');
-          break;
-        case 'STATUS:tmux_not_found':
-          emitter.emit('installing', 'tmux not found, installing...');
-          break;
-        case 'STATUS:tmux_installing':
-          emitter.emit('installing', 'Installing tmux...');
-          break;
-        case 'STATUS:tmux_ready':
-          emitter.emit('connecting');
-          break;
-        case 'STATUS:error:tmux_no_brew':
-          stopped = true;
-          emitter.emit('error', 'tmux is required but not installed.\nPlease install it manually:\n  sudo apt install tmux\nthen relaunch Arcway.');
-          break;
-        case 'STATUS:error:tmux_install_failed':
-          stopped = true;
-          emitter.emit('error', 'Failed to install tmux automatically.\nPlease install it manually:\n  sudo apt install tmux\nthen relaunch Arcway.');
-          break;
-      }
-    }
-  });
-
-  proc.stderr.on('data', (d) => process.stderr.write(d));
-
-  proc.on('exit', () => {
-    proc = null;
-    if (stopped || myGeneration !== generation) return;
-    emitter.emit('disconnected');
-    setTimeout(() => {
-      if (!stopped && myGeneration === generation) start();
-    }, 5000);
-  });
-}
+function init(get, set) { getState = get; setState = set; }
 
 function startIfCredentialed() {
   if (!credentials.load('device_credential')) return;
-  emitter.emit('connecting');
-  start();
+  setState({ type: 'connecting' });
+  start('networkOffline');
+}
+
+async function start(fallbackState = 'loggedOut') {
+  if (proc) { generation++; proc.kill(); proc = null; }
+  stopped = false;
+  const myGeneration = ++generation;
+
+  const env = await shellEnvironment();
+  if (stopped || myGeneration !== generation) return;
+  env.RELAY_URL = relayUrl().replace(/^http/, 'ws');
+  env.DEVICE_CREDENTIAL = credentials.load('device_credential') || '';
+  const deviceId = credentials.load('device_id');
+  if (deviceId) env.DEVICE_ID = deviceId;
+  // Corporate proxies: trust the distro CA store like the Mac app trusts the keychain.
+  env.NODE_EXTRA_CA_CERTS ||= CA_BUNDLES.find((p) => fs.existsSync(p));
+  if (!env.NODE_EXTRA_CA_CERTS) delete env.NODE_EXTRA_CA_CERTS;
+
+  const { node, service } = runtime.paths();
+  const p = spawn(node, [path.join(service, 'src/server.js')], { env, cwd: service, stdio: ['ignore', 'pipe', 'ignore'] });
+  p.on('error', (err) => {
+    if (myGeneration !== generation) return;
+    stopped = true;
+    setState({ type: 'error', message: `Failed to start agent: ${err.message}` });
+  });
+  readline.createInterface({ input: p.stdout }).on('line', (line) => {
+    if (myGeneration === generation && line.trim()) handle(line.trim());
+  });
+  p.on('exit', () => handleTermination(myGeneration));
+
+  proc = p;
+  watchdogFallback = fallbackState;
+  cancelWatchdog();
+  armWatchdog();
+}
+
+// Falls back if `connecting` persists 15s. Re-armed on every entry to `connecting`;
+// cancelled on `connected` / stop().
+function armWatchdog() {
+  if (watchdog) return;
+  const gen = generation;
+  const fallback = watchdogFallback;
+  watchdog = setTimeout(() => {
+    watchdog = null;
+    if (stopped || gen !== generation) return;
+    if (getState().type === 'connecting') {
+      stop();
+      setState({ type: fallback });
+    }
+  }, 15000);
+}
+
+function cancelWatchdog() {
+  clearTimeout(watchdog);
+  watchdog = null;
 }
 
 function stop() {
+  setState({ phoneConnected: false });
   stopped = true;
   generation++;
-  if (proc) {
-    proc.kill();
-    proc = null;
+  cancelWatchdog();
+  proc?.kill();
+  proc = null;
+}
+
+function handleTermination(gen) {
+  if (gen !== generation) return;
+  proc = null;
+  if (stopped) return;
+  setState({ type: 'connecting' });
+  setTimeout(() => {
+    if (!stopped && gen === generation) start('networkOffline');
+  }, 5000);
+}
+
+function handle(line) {
+  // "STATUS:client_connected[:<device name>]"
+  const connectedPrefix = 'STATUS:client_connected';
+  if (line.startsWith(connectedPrefix)) {
+    const name = line.slice(connectedPrefix.length).replace(/^:+/, '').trim();
+    setState({ phoneConnected: true, phoneName: name || null });
+    return;
+  }
+  switch (line) {
+    case 'STATUS:connected': {
+      cancelWatchdog();
+      const name = (credentials.load('user_email') || '').split('@')[0];
+      setState({ type: 'connected', userName: name || 'there' });
+      break;
+    }
+    case 'STATUS:disconnected':
+      setState({ type: 'connecting', phoneConnected: false });
+      armWatchdog();
+      break;
+    case 'STATUS:client_disconnected':
+      setState({ phoneConnected: false });
+      break;
+    case 'STATUS:invalid_credential':
+      stop();
+      credentials.clearAll();
+      setState({ type: 'loggedOut' });
+      break;
+    case 'STATUS:tmux_not_found':
+      setState({ type: 'installing', message: 'tmux not found, installing...' });
+      break;
+    case 'STATUS:tmux_installing':
+      setState({ type: 'installing', message: 'Installing tmux...' });
+      break;
+    case 'STATUS:tmux_ready':
+      setState({ type: 'connecting' });
+      break;
+    // The backend only knows Homebrew; on Linux tmux comes from the distro (the .deb depends on it).
+    case 'STATUS:error:tmux_no_brew':
+      stopped = true;
+      setState({ type: 'error', message: 'tmux is required but not installed.\nPlease install tmux manually:\nsudo apt install tmux\n(or dnf / pacman), then Retry.' });
+      break;
+    case 'STATUS:error:tmux_install_failed':
+      stopped = true;
+      setState({ type: 'error', message: 'Failed to install tmux.\nPlease install it manually:\nsudo apt install tmux\nthen relaunch Arcway.' });
+      break;
   }
 }
 
-module.exports = { start, startIfCredentialed, stop, setBackendPath, on: emitter.on.bind(emitter) };
+// Login-shell env so agents see the user's PATH. Cached; refreshed in the background.
+function computeShellEnvironment() {
+  const shell = process.env.SHELL || '/bin/bash';
+  const args = shell.endsWith('fish') ? ['-l', '-c', 'env'] : ['-l', '-i', '-c', 'env'];
+  return new Promise((resolve) => {
+    execFile(shell, args, { timeout: 5000, encoding: 'utf8', maxBuffer: 4 << 20 }, (_err, stdout) => {
+      const env = {};
+      for (const line of (stdout || '').split('\n')) {
+        const m = /^(\w+)=(.*)$/.exec(line);
+        if (m) env[m[1]] = m[2];
+      }
+      if (env.PATH) settings.set('shellEnv', env);
+      resolve(env.PATH ? env : { ...process.env });
+    });
+  });
+}
+
+async function shellEnvironment() {
+  const cached = settings.get('shellEnv');
+  if (cached) { computeShellEnvironment(); return { ...cached }; }
+  return computeShellEnvironment();
+}
+
+module.exports = { init, start, startIfCredentialed, stop };

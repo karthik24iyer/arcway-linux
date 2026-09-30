@@ -1,131 +1,125 @@
-const { shell } = require('electron');
+// Port of arcway-mac AuthService. Google and Apple both finish in the default browser and
+// come back through x-scheme-handler URLs registered by main.js (registerSchemes).
+const { shell, net } = require('electron');
 const crypto = require('crypto');
-const http = require('http');
-const https = require('https');
-const credentials = require('./credentials');
-const config = require('./config');
+const os = require('os');
+const { credentials, relayUrl, DEFAULT_RELAY_URL } = require('./store');
 
-const LINUX_CLIENT_ID = 'YOUR_LINUX_CLIENT_ID.apps.googleusercontent.com'; // TODO: replace with Desktop app OAuth client ID
+// Same OAuth clients as the Mac app, so the relay accepts the tokens unchanged.
+const GOOGLE_CLIENT_ID = '260109272007-m8upo6vn1531vrtsiepmgc4ukthr35bd.apps.googleusercontent.com';
+const GOOGLE_SCHEME = 'com.googleusercontent.apps.260109272007-m8upo6vn1531vrtsiepmgc4ukthr35bd';
+const GOOGLE_REDIRECT = `${GOOGLE_SCHEME}:/oauth2callback`;
+const APPLE_CLIENT_ID = 'com.arcway.app.macsignin';
+const APPLE_SCHEME = 'arcway-auth';
 
-async function login() {
+class CancelledError extends Error {}
+
+let pending = null;
+
+// Opens the browser and resolves with the ?code= of the callback URL.
+function waitForCode(url) {
+  pending?.reject(new CancelledError('cancelled'));
+  return new Promise((resolve, reject) => {
+    pending = { resolve, reject };
+    shell.openExternal(url).catch(reject);
+  });
+}
+
+function handleCallback(url) {
+  if (!pending) return;
+  const { resolve, reject } = pending;
+  pending = null;
+  const q = new URL(url).searchParams;
+  if (q.get('error')) reject(new Error(`Login denied: ${q.get('error')}`));
+  else if (q.get('code')) resolve(q.get('code'));
+  else reject(new Error('No authorization code received'));
+}
+
+async function request(url, { body, form, token } = {}) {
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (form) headers['Content-Type'] = 'application/x-www-form-urlencoded';
+  else if (body) headers['Content-Type'] = 'application/json';
+  const res = await net.fetch(url, {
+    method: body || form ? 'POST' : 'GET',
+    headers,
+    body: form ? new URLSearchParams(form).toString() : body && JSON.stringify(body),
+  });
+  let json = {};
+  try { json = await res.json(); } catch {}
+  return { status: res.status, json };
+}
+
+async function saveSession(json, baseUrl, email) {
+  if (!json.session_token) throw new Error('Sign-in failed. Please try again.');
+  credentials.save('session_token', json.session_token);
+  credentials.save('user_email', email ?? json.email ?? 'unknown');
+
+  const { status, json: dev } = await request(`${baseUrl}/api/devices/register`, {
+    body: { name: os.hostname() },
+    token: json.session_token,
+  });
+  if (status === 403) throw new Error('Free accounts can pair one host. Get Arcway Forever in the Arcway phone app, then try again.');
+  if (!dev.device_credential || !dev.device_id) throw new Error('Failed to register device');
+  credentials.save('device_credential', dev.device_credential);
+  credentials.save('device_id', dev.device_id);
+}
+
+async function loginWithGoogle() {
   const verifier = crypto.randomBytes(32).toString('base64url');
   const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+  const code = await waitForCode('https://accounts.google.com/o/oauth2/v2/auth?' + new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: GOOGLE_REDIRECT,
+    response_type: 'code',
+    scope: 'openid email profile',
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+  }));
 
-  const { code, redirectUri } = await new Promise((resolve, reject) => {
-    let redirectUri;
-    const server = http.createServer((req, res) => {
-      const url = new URL(req.url, 'http://localhost');
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end('<html><body><h3>Login complete. You can close this window.</h3></body></html>');
-      server.close();
-      const error = url.searchParams.get('error');
-      const code = url.searchParams.get('code');
-      if (error) reject(new Error(`OAuth denied: ${error}`));
-      else if (code) resolve({ code, redirectUri });
-      else reject(new Error('No authorization code received'));
-    });
-
-    server.listen(0, '127.0.0.1', () => {
-      redirectUri = `http://127.0.0.1:${server.address().port}`;
-      const params = new URLSearchParams({
-        client_id: LINUX_CLIENT_ID,
-        redirect_uri: redirectUri,
-        response_type: 'code',
-        scope: 'openid email profile',
-        code_challenge: challenge,
-        code_challenge_method: 'S256',
-      });
-      shell.openExternal(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
-    });
-
-    server.on('error', reject);
+  const { json: tok } = await request('https://oauth2.googleapis.com/token', {
+    form: { code, client_id: GOOGLE_CLIENT_ID, redirect_uri: GOOGLE_REDIRECT, code_verifier: verifier, grant_type: 'authorization_code' },
   });
+  if (!tok.id_token) throw new Error('Failed to exchange authorization code');
 
-  const idToken = await exchangeCode(code, verifier, redirectUri);
-  const { sessionToken, email } = await authenticateWithRelay(idToken);
-  credentials.save('session_token', sessionToken);
-  credentials.save('user_email', email);
-  const { deviceCredential, deviceId } = await registerDevice(sessionToken);
-  credentials.save('device_credential', deviceCredential);
-  credentials.save('device_id', deviceId);
+  const { json } = await request(`${DEFAULT_RELAY_URL}/auth/google`, { body: { id_token: tok.id_token } });
+  await saveSession(json, DEFAULT_RELAY_URL);
 }
 
-function logout() {
-  credentials.clearAll();
+// The relay's /auth/apple/callback bounces the code to arcway-auth://callback.
+async function loginWithApple() {
+  const code = await waitForCode('https://appleid.apple.com/auth/authorize?' + new URLSearchParams({
+    client_id: APPLE_CLIENT_ID,
+    redirect_uri: `${DEFAULT_RELAY_URL}/auth/apple/callback`,
+    response_type: 'code',
+    response_mode: 'query',
+    state: crypto.randomUUID(),
+  }));
+  const { json } = await request(`${DEFAULT_RELAY_URL}/auth/apple/mac`, { body: { authorization_code: code } });
+  await saveSession(json, DEFAULT_RELAY_URL);
 }
 
-function decodeEmailFromJWT(token) {
-  try {
-    const parts = token.split('.');
-    if (parts.length < 2) return null;
-    const payload = Buffer.from(parts[1], 'base64url').toString('utf8');
-    return JSON.parse(payload).email || null;
-  } catch (_) { return null; }
+async function pair() {
+  const baseUrl = relayUrl();
+  const { status, json } = await request(`${baseUrl}/auth/pair-initiate`, { body: {} });
+  if (status === 409) throw new Error('Another device is using this relay. Stop them or reset the relay to continue.');
+  if (status === 401) throw new Error('Pairing failed');
+  if (status === 429) throw new Error('Too many attempts. Please wait a minute and try again.');
+  if (status !== 200 || !json.pair_code) throw new Error('Sign-in failed. Please try again.');
+  await saveSession(json, baseUrl, 'self-host');
+  return json.pair_code;
 }
 
-async function exchangeCode(code, verifier, redirectUri) {
-  const body = new URLSearchParams({
-    code,
-    client_id: LINUX_CLIENT_ID,
-    redirect_uri: redirectUri,
-    code_verifier: verifier,
-    grant_type: 'authorization_code',
-  }).toString();
-
-  const json = await httpPost('https://oauth2.googleapis.com/token', body, {
-    'Content-Type': 'application/x-www-form-urlencoded',
-  });
-
-  if (!json.id_token) throw new Error('Token exchange failed');
-  return json.id_token;
+async function fetchPairCode() {
+  const token = credentials.load('session_token');
+  if (!token) return null;
+  const { json } = await request(`${relayUrl()}/api/pair/code`, { token });
+  return json.pair_code || null;
 }
 
-async function authenticateWithRelay(idToken) {
-  const relayUrl = config.getRelayUrl();
-  const json = await httpPost(`${relayUrl}/auth/google`, JSON.stringify({ id_token: idToken }), {
-    'Content-Type': 'application/json',
-  });
-  if (!json.session_token) throw new Error('Relay authentication failed');
-  const email = json.email || decodeEmailFromJWT(json.session_token) || 'unknown';
-  return { sessionToken: json.session_token, email };
-}
+const logout = () => credentials.clearAll();
 
-async function registerDevice(sessionToken) {
-  const relayUrl = config.getRelayUrl();
-  const json = await httpPost(
-    `${relayUrl}/api/devices/register`,
-    JSON.stringify({ name: require('os').hostname() }),
-    { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionToken}` }
-  );
-  if (json.error === 'Device limit reached') {
-    throw new Error('Free accounts can pair one host. Get Arcway Forever in the Arcway phone app, then try again.');
-  }
-  if (!json.device_credential || !json.device_id) throw new Error('Device registration failed');
-  return { deviceCredential: json.device_credential, deviceId: json.device_id };
-}
-
-function httpPost(url, body, headers) {
-  return new Promise((resolve, reject) => {
-    const urlObj = new URL(url);
-    const transport = urlObj.protocol === 'https:' ? https : http;
-    const req = transport.request({
-      hostname: urlObj.hostname,
-      port: urlObj.port || undefined,
-      path: urlObj.pathname + urlObj.search,
-      method: 'POST',
-      headers: { ...headers, 'Content-Length': Buffer.byteLength(body) },
-    }, (res) => {
-      let chunks = '';
-      res.on('data', c => chunks += c);
-      res.on('end', () => {
-        try { resolve(JSON.parse(chunks)); }
-        catch (_) { reject(new Error('Invalid response from server')); }
-      });
-    });
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
-}
-
-module.exports = { login, logout };
+module.exports = {
+  loginWithGoogle, loginWithApple, pair, fetchPairCode, logout, handleCallback,
+  CancelledError, SCHEMES: [GOOGLE_SCHEME, APPLE_SCHEME],
+};

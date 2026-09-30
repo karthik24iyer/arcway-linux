@@ -2,318 +2,223 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<!-- Mirrors arcway-mac Views/{PopoverView,LoginView,ConnectedView}.swift. Keep them 1:1. -->
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background: #1e1e2e;
-    color: #cdd6f4;
-    font-family: system-ui, sans-serif;
-    font-size: 13px;
-    width: 260px;
-    overflow: hidden;
-    -webkit-app-region: no-drag;
-    user-select: none;
+  :root {
+    --bg: #ececec; --fg: #1d1d1f; --secondary: #6e6e73; --divider: #d1d1d6; --field: #fff;
+    --accent: #0a84ff; --green: #34c759; --orange: #ff9500; --red: #ff3b30; --chip: rgba(0,0,0,.08);
   }
-  .view { display: none; padding: 16px; }
-  .view.active { display: block; }
-  h1 { font-size: 14px; font-weight: 600; color: #cdd6f4; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1e1e1e; --fg: #f5f5f7; --secondary: #98989d; --divider: #3a3a3c; --field: #2c2c2e; --chip: rgba(255,255,255,.12); }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { background: var(--bg); color: var(--fg); overflow: hidden; user-select: none; }
+  body { font: 13px system-ui, sans-serif; width: 272px; }
+  #root { padding: 16px; }
+  .center { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 8px 0; text-align: center; }
+  .stack { display: flex; flex-direction: column; gap: 10px; }
+  .login { display: flex; flex-direction: column; align-items: stretch; gap: 16px; padding: 8px 10px; }
   .row { display: flex; align-items: center; gap: 6px; }
-  .muted { color: #6c7086; font-size: 11px; }
-  .red { color: #f38ba8; font-size: 11px; white-space: pre-line; }
-  hr { border: none; border-top: 1px solid #313244; margin: 10px 0; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .dot-green { background: #a6e3a1; }
-  .dot-orange { background: #fab387; }
-  .subtitle { font-size: 12px; color: #a6adc8; margin-top: 4px; }
+  .spread { justify-content: space-between; }
+  h1 { font-size: 13px; font-weight: 700; }
+  .sub { font-size: 12px; }
+  .caption { font-size: 11px; }
+  .muted { color: var(--secondary); }
+  .error { color: var(--red); font-size: 11px; white-space: pre-line; text-align: center; }
+  hr { border: 0; border-top: 1px solid var(--divider); width: 100%; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .square { width: 10px; height: 10px; border-radius: 3px; flex: none; background: var(--chip); }
+  .code { font: bold 13px ui-monospace, monospace; padding: 4px 10px; background: var(--chip); border-radius: 5px; align-self: flex-start; }
+  .ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-  button {
-    background: none;
-    border: none;
-    cursor: pointer;
-    font-family: inherit;
-    font-size: 13px;
-    color: #cdd6f4;
-    padding: 0;
-    text-align: left;
-  }
-  button:hover { color: #fff; }
-  .btn-primary {
-    background: #89b4fa;
-    color: #1e1e2e;
-    border-radius: 6px;
-    padding: 7px 14px;
-    font-weight: 600;
-    width: 100%;
-    text-align: center;
-    margin-top: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    min-height: 34px;
-  }
-  .btn-primary:hover { background: #b4d0ff; color: #1e1e2e; }
-  .btn-primary:disabled { opacity: 0.5; cursor: default; }
-  .btn-danger { color: #f38ba8; }
-  .btn-danger:hover { color: #ff9cb0; }
-  .btn-accent { color: #89b4fa; }
-  .btn-accent:hover { color: #b4d0ff; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  .plain { background: none; border: 0; padding: 0; text-align: left; }
+  .plain:disabled { cursor: default; }
+  .prominent, .bordered { min-height: 32px; border-radius: 6px; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 0 12px; }
+  .prominent { background: var(--accent); color: #fff; border: 0; font-weight: 500; }
+  .bordered { background: var(--chip); border: 0; }
+  .prominent:disabled, .bordered:disabled { opacity: .45; cursor: default; }
+  .small { min-height: 28px; }
+  input[type=text] { font: inherit; font-size: 11px; color: var(--fg); background: var(--field); border: 1px solid var(--divider); border-radius: 5px; padding: 5px 7px; width: 100%; outline: none; }
+  input[type=text]:focus { border-color: var(--accent); }
 
-  .toggle-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 2px 0;
-  }
-  .toggle {
-    position: relative;
-    width: 32px;
-    height: 18px;
-    flex-shrink: 0;
-  }
-  .toggle input { display: none; }
-  .toggle-track {
-    position: absolute;
-    inset: 0;
-    background: #313244;
-    border-radius: 9px;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-  .toggle input:checked + .toggle-track { background: #89b4fa; }
-  .toggle-thumb {
-    position: absolute;
-    top: 2px; left: 2px;
-    width: 14px; height: 14px;
-    background: #cdd6f4;
-    border-radius: 50%;
-    transition: left 0.15s;
-    pointer-events: none;
-  }
-  .toggle input:checked ~ .toggle-thumb { left: 16px; }
+  .switch { position: relative; width: 32px; height: 18px; flex: none; }
+  .switch input { opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; position: absolute; z-index: 1; }
+  .switch span { position: absolute; inset: 0; border-radius: 9px; background: var(--divider); transition: background .15s; }
+  .switch span::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: left .15s; box-shadow: 0 1px 2px rgba(0,0,0,.3); }
+  .switch input:checked + span { background: var(--accent); }
+  .switch input:checked + span::after { left: 16px; }
 
-  .spinner {
-    width: 14px; height: 14px;
-    border: 2px solid #45475a;
-    border-top-color: #89b4fa;
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-    flex-shrink: 0;
-  }
+  .spinner { width: 14px; height: 14px; border: 2px solid var(--divider); border-top-color: var(--secondary); border-radius: 50%; animation: spin .8s linear infinite; flex: none; }
   @keyframes spin { to { transform: rotate(360deg); } }
-
-  .section { display: flex; flex-direction: column; gap: 8px; }
-  .actions { display: flex; flex-direction: column; gap: 6px; }
-
-  .access-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
-  .access-icon { font-size: 13px; line-height: 1; }
-  .access-granted { color: #a6e3a1; }
-  .access-denied { color: #fab387; }
-
-  .settings-panel { display: flex; flex-direction: column; gap: 6px; padding: 6px 0 2px; }
-  .settings-label { font-size: 11px; color: #6c7086; }
-  .settings-input {
-    background: #313244;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    color: #cdd6f4;
-    font-size: 11px;
-    font-family: inherit;
-    padding: 5px 8px;
-    width: 100%;
-    outline: none;
-  }
-  .settings-input:focus { border-color: #89b4fa; }
-  .settings-btns { display: flex; gap: 6px; }
-  .btn-sm {
-    font-size: 11px;
-    padding: 4px 10px;
-    border-radius: 4px;
-    border: 1px solid #45475a;
-    cursor: pointer;
-    font-family: inherit;
-  }
-  .btn-sm-primary { background: #89b4fa; color: #1e1e2e; border-color: #89b4fa; font-weight: 600; }
-  .btn-sm-primary:hover { background: #b4d0ff; }
-  .btn-sm-ghost { background: none; color: #cdd6f4; }
-  .btn-sm-ghost:hover { background: #313244; }
+  .ok { color: var(--green); } .warn { color: var(--orange); }
+  svg { flex: none; }
 </style>
 </head>
 <body>
-
-<!-- loggedOut -->
-<div id="view-loggedOut" class="view">
-  <div class="section">
-    <h1>Arcway</h1>
-    <button class="btn-primary" id="btn-login" onclick="doLogin()">Login with Google</button>
-  </div>
-</div>
-
-<!-- connecting -->
-<div id="view-connecting" class="view">
-  <div class="section">
-    <h1>Arcway</h1>
-    <div class="row">
-      <div class="spinner"></div>
-      <span class="muted">Connecting...</span>
-    </div>
-    <div class="actions">
-      <button onclick="window.api.quit()">Quit</button>
-    </div>
-  </div>
-</div>
-
-<!-- installing -->
-<div id="view-installing" class="view">
-  <div class="section">
-    <h1>Arcway</h1>
-    <div class="row">
-      <div class="spinner"></div>
-      <span class="muted" id="installing-msg">Installing...</span>
-    </div>
-    <div class="actions">
-      <button onclick="window.api.quit()">Quit</button>
-    </div>
-  </div>
-</div>
-
-<!-- connected -->
-<div id="view-connected" class="view">
-  <div class="section">
-    <div class="row">
-      <div class="dot dot-green" id="status-dot"></div>
-      <h1>Arcway</h1>
-    </div>
-    <div class="subtitle">Hello, <span id="user-name"></span></div>
-    <span class="muted">Connected</span>
-    <hr>
-    <label class="toggle-row">
-      <span>Launch at login</span>
-      <div class="toggle">
-        <input type="checkbox" id="toggle-autostart" onchange="window.api.setAutostart(this.checked)">
-        <div class="toggle-track"></div>
-        <div class="toggle-thumb"></div>
-      </div>
-    </label>
-    <label class="toggle-row">
-      <span>Keep System Awake</span>
-      <div class="toggle">
-        <input type="checkbox" id="toggle-keepawake" onchange="window.api.setKeepAwake(this.checked)">
-        <div class="toggle-track"></div>
-        <div class="toggle-thumb"></div>
-      </div>
-    </label>
-    <div class="access-row" id="access-row">
-      <span class="access-icon access-granted" id="access-icon">✓</span>
-      <span id="access-label">File access granted</span>
-    </div>
-    <hr>
-    <button class="btn-accent" onclick="toggleSettings()">Settings</button>
-    <div class="settings-panel" id="settings-panel" style="display:none">
-      <span class="settings-label">Relay Server URL</span>
-      <input class="settings-input" id="relay-url-input" type="text" placeholder="https://your-relay.example.com">
-      <div class="settings-btns">
-        <button class="btn-sm btn-sm-primary" onclick="saveRelayUrl()">Save & Reconnect</button>
-        <button class="btn-sm btn-sm-ghost" onclick="resetRelayUrl()">Reset</button>
-      </div>
-    </div>
-    <hr>
-    <div class="actions">
-      <button onclick="window.api.retry()">Reconnect</button>
-      <button class="btn-danger" onclick="window.api.logout()">Logout</button>
-      <button onclick="window.api.quit()">Quit</button>
-    </div>
-  </div>
-</div>
-
-<!-- error -->
-<div id="view-error" class="view">
-  <div class="section">
-    <h1>Arcway</h1>
-    <span id="error-msg" class="red"></span>
-    <div class="actions">
-      <button class="btn-primary" onclick="window.api.retry()">Retry</button>
-    </div>
-  </div>
-</div>
-
+<div id="root"></div>
 <script>
-  const views = ['loggedOut', 'connecting', 'installing', 'connected', 'error'];
-  const HEIGHT_CONNECTED = 355;
-  const HEIGHT_CONNECTED_SETTINGS = 455;
-  let settingsOpen = false;
+const root = document.getElementById('root');
+let state = { type: 'loggedOut' };
+let settings = {};
+let ui = { loading: null, error: null, pairCode: null, showHookInfo: false };
 
-  function show(type) {
-    views.forEach(v => {
-      document.getElementById('view-' + v).classList.toggle('active', v === type);
-    });
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const spinner = '<div class="spinner"></div>';
+const toggle = (key, label, extra = '') =>
+  `<label class="row spread sub"><span>${label}</span>${extra}<span class="switch"><input type="checkbox" data-setting="${key}" ${settings[key] ? 'checked' : ''}><span></span></span></label>`;
+const statusRow = (ok, okText, action, actionText) =>
+  `<div class="row sub"><span class="${ok ? 'ok' : 'warn'}">${ok ? '✔' : '!'}</span>` +
+  `<button class="plain ${ok ? 'muted' : 'warn'}" data-action="${action}" ${ok ? 'disabled' : ''}>${ok ? okText : actionText}</button></div>`;
+
+const views = {
+  loggedOut: () => `
+    <div class="login">
+      <h1 style="text-align:center">Arcway</h1>
+      ${ui.error ? `<div class="error">${esc(ui.error)}</div>` : ''}
+      <div class="stack">
+        <button class="prominent" data-action="login-google" ${settings.selfHost || ui.loading ? 'disabled' : ''}>
+          ${ui.loading === 'google' ? spinner : 'Sign in with Google'}</button>
+        <button class="bordered" data-action="login-apple" ${settings.selfHost || ui.loading ? 'disabled' : ''}>
+          ${ui.loading === 'apple' ? spinner : 'Sign in with Apple'}</button>
+      </div>
+      <hr>
+      ${toggle('selfHost', '<span class="caption">Self Host?</span>')}
+      ${settings.selfHost ? `
+        <input type="text" id="relay-url" placeholder="Relay URL" spellcheck="false" value="${esc(settings.relayUrl)}">
+        <button class="prominent small" data-action="pair" ${ui.loading || !settings.relayUrl ? 'disabled' : ''}>
+          ${ui.loading === 'pair' ? spinner : 'Pair'}</button>` : ''}
+      <button class="plain muted caption" style="align-self:center" data-action="quit">Quit</button>
+    </div>`,
+
+  connecting: () => `
+    <div class="center">
+      <h1>Arcway</h1>
+      <div class="row">${spinner}<span class="muted">Connecting...</span></div>
+      <button class="plain" data-action="quit">Quit</button>
+    </div>`,
+
+  networkOffline: () => `
+    <div class="center">
+      <h1>Arcway</h1>
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="muted">
+        <path d="M2 8.8a15 15 0 0 1 4.2-2.6M9.9 4.6A15 15 0 0 1 22 8.8M5 12.9a10 10 0 0 1 5.2-2.7M16.7 11a10 10 0 0 1 2.3 1.9M8.5 16.4a5 5 0 0 1 7 0M12 20h.01M2 2l20 20"/></svg>
+      <span class="sub muted">Network Offline</span>
+      <button class="prominent" data-action="retry-offline">Retry</button>
+      <button class="plain" data-action="quit">Quit</button>
+    </div>`,
+
+  installing: () => `
+    <div class="center">
+      <h1>Arcway</h1>
+      ${spinner}
+      <span class="caption muted" style="white-space:pre-line">${esc(state.message)}</span>
+    </div>`,
+
+  error: () => `
+    <div class="center">
+      <h1>Arcway</h1>
+      <div class="error">${esc(state.message)}</div>
+      <button class="prominent" data-action="retry">Retry</button>
+    </div>`,
+
+  connected: () => `
+    <div class="stack">
+      <div class="row"><div class="dot" style="background:var(--green)"></div><h1>Arcway</h1></div>
+      <div class="sub">${settings.selfHost ? 'Hello User' : `Hello ${esc(state.userName)}`}</div>
+      ${settings.selfHost && ui.pairCode ? `
+        <div class="stack" style="gap:4px"><span class="sub">Pair your device with code:</span><span class="code">${esc(ui.pairCode)}</span></div>` : ''}
+      <div class="row caption">
+        <div class="square" ${state.phoneConnected ? 'style="background:var(--green)"' : ''}></div>
+        <span class="ellipsis ${state.phoneConnected ? '' : 'muted'}">${state.phoneConnected
+          ? 'Phone Connected' + (state.phoneName ? ` · ${esc(state.phoneName)}` : '') : 'Connected · no phone'}</span>
+      </div>
+      <hr>
+      ${toggle('launchAtLogin', 'Launch at login')}
+      ${toggle('keepAwake', 'Keep computer awake')}
+      <div class="row spread sub">
+        <span style="flex:1">Sync agent commands</span>
+        <button class="plain muted" data-action="hook-info" title="Info" style="margin-right:6px">ⓘ</button>
+        <span class="switch"><input type="checkbox" data-setting="shellHook" ${settings.shellHook ? 'checked' : ''}><span></span></span>
+      </div>
+      ${ui.showHookInfo ? `<div class="caption muted">Type 'claude' instead of 'arcway claude' in new terminals. Adds a block to ~/${esc(settings.shellRc)}.</div>` : ''}
+      ${statusRow(settings.cliInstalled, 'Terminal command installed', 'install-cli', 'Install <code>arcway</code> terminal command')}
+      <hr>
+      <button class="plain" data-action="reconnect">Reconnect</button>
+      <button class="plain" style="color:var(--red)" data-action="logout">Logout</button>
+      <button class="plain" data-action="check-updates">Check for Updates…</button>
+      <button class="plain" data-action="quit">Quit</button>
+    </div>`,
+};
+
+function render() {
+  root.innerHTML = (views[state.type] || views.loggedOut)();
+  api.invoke('resize', root.getBoundingClientRect().height);
+}
+
+async function refresh() {
+  settings = await api.invoke('get-settings');
+  render();
+  if (state.type === 'connected' && settings.selfHost) {
+    ui.pairCode = await api.invoke('fetch-pair-code');
+    render();
   }
+}
 
-  window.api.onState(async (state) => {
-    show(state.type);
-    if (state.type === 'connected') {
-      document.getElementById('user-name').textContent = state.userName || '';
-      const hasAccess = await window.api.checkFileAccess();
-      const dot = document.getElementById('status-dot');
-      const icon = document.getElementById('access-icon');
-      const label = document.getElementById('access-label');
-      dot.className = 'dot ' + (hasAccess ? 'dot-green' : 'dot-orange');
-      icon.className = 'access-icon ' + (hasAccess ? 'access-granted' : 'access-denied');
-      icon.textContent = hasAccess ? '✓' : '⚠';
-      label.textContent = hasAccess ? 'File access granted' : 'File access limited';
+async function runLogin(provider, channel) {
+  ui.loading = provider;
+  ui.error = null;
+  render();
+  const error = await api.invoke(channel);
+  if (ui.loading === provider) { ui.loading = null; ui.error = error; }
+  render();
+}
 
-      const url = await window.api.getRelayUrl();
-      document.getElementById('relay-url-input').value = url;
-
-      const autostartEnabled = await window.api.getAutostart();
-      document.getElementById('toggle-autostart').checked = autostartEnabled;
-
-      if (settingsOpen) {
-        settingsOpen = false;
-        document.getElementById('settings-panel').style.display = 'none';
-        window.api.resize(HEIGHT_CONNECTED);
-      }
-    }
-    if (state.type === 'installing') {
-      document.getElementById('installing-msg').textContent = state.message || 'Installing...';
-    }
-    if (state.type === 'error') {
-      document.getElementById('error-msg').textContent = state.message || 'Unknown error';
-    }
-  });
-
-  function toggleSettings() {
-    settingsOpen = !settingsOpen;
-    document.getElementById('settings-panel').style.display = settingsOpen ? 'flex' : 'none';
-    window.api.resize(settingsOpen ? HEIGHT_CONNECTED_SETTINGS : HEIGHT_CONNECTED);
+root.addEventListener('click', async (e) => {
+  const el = e.target.closest('[data-action]');
+  if (!el || el.disabled) return;
+  const action = el.dataset.action;
+  if (action === 'login-google') return runLogin('google', 'login-google');
+  if (action === 'login-apple') return runLogin('apple', 'login-apple');
+  if (action === 'pair') {
+    await api.invoke('set-setting', 'relayUrl', document.getElementById('relay-url').value.trim());
+    return runLogin('pair', 'pair');
   }
+  if (action === 'hook-info') { ui.showHookInfo = !ui.showHookInfo; return render(); }
+  if (action === 'install-cli') { settings.cliInstalled = await api.invoke('install-cli'); return render(); }
+  api.invoke(action);
+});
 
-  function saveRelayUrl() {
-    const url = document.getElementById('relay-url-input').value.trim();
-    settingsOpen = false;
-    document.getElementById('settings-panel').style.display = 'none';
-    window.api.resize(HEIGHT_CONNECTED);
-    window.api.setRelayUrl(url);
-  }
+root.addEventListener('change', async (e) => {
+  const key = e.target.dataset.setting;
+  if (!key) return;
+  settings[key] = await api.invoke('set-setting', key, e.target.checked);
+  render();
+});
 
-  function resetRelayUrl() {
-    const def = 'https://claude-relay-server.duckdns.org';
-    document.getElementById('relay-url-input').value = def;
-    settingsOpen = false;
-    document.getElementById('settings-panel').style.display = 'none';
-    window.api.resize(HEIGHT_CONNECTED);
-    window.api.setRelayUrl(def);
-  }
+root.addEventListener('input', (e) => {
+  if (e.target.id !== 'relay-url') return;
+  settings.relayUrl = e.target.value;
+  api.invoke('set-setting', 'relayUrl', e.target.value);
+  const btn = root.querySelector('[data-action="pair"]');
+  if (btn) btn.disabled = !!ui.loading || !e.target.value;
+});
 
-  function doLogin() {
-    const btn = document.getElementById('btn-login');
-    btn.disabled = true;
-    btn.innerHTML = '<div class="spinner"></div>';
-    window.api.login().finally(() => {
-      btn.disabled = false;
-      btn.innerHTML = 'Login with Google';
-    });
-  }
+api.onState((s) => {
+  const entered = s.type !== state.type;
+  state = s;
+  if (entered) refresh(); else render();
+});
+
+// Mac LoginView.onAppear / ConnectedView.onAppear: reset login UI, re-read settings, refresh pair code.
+api.onShown(() => {
+  ui.loading = null;
+  ui.error = null;
+  refresh();
+});
+
+refresh();
 </script>
 </body>
 </html>

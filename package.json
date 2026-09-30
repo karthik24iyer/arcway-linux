@@ -1,51 +1,35 @@
 {
-  "name": "arcway-linux",
-  "version": "1.0.0",
-  "description": "Arcway remote desktop tray app",
-  "author": "Arcway",
+  "name": "arcway-desktop",
+  "productName": "Arcway",
+  "version": "2.1.1",
+  "description": "Arcway desktop agent: run Claude, Codex, Copilot and Antigravity from your phone",
+  "homepage": "https://github.com/karthik24iyer/arcway-relay-server",
+  "author": "Arcway <app@arcway.local>",
+  "license": "UNLICENSED",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --linux --x64"
-  },
-  "dependencies": {
-    "@napi-rs/keyring": "^1.1.5"
+    "dist": "bash build.sh"
   },
   "devDependencies": {
-    "electron": "^30.0.0",
+    "electron": "^44.4.5",
     "electron-builder": "^26.8.1"
-  },
-  "optionalDependencies": {
-    "@napi-rs/keyring-linux-x64-gnu": "^1.2.0"
   },
   "build": {
     "appId": "com.arcway.app",
     "productName": "Arcway",
-    "npmRebuild": false,
-    "files": [
-      "main.js",
-      "preload.js",
-      "renderer/**",
-      "src/**",
-      "assets/**",
-      "node_modules/**"
-    ],
-    "extraResources": [
-      {
-        "from": "../arcway-backend",
-        "to": "backend",
-        "filter": ["src/**", "package.json", "package-lock.json"]
-      }
-    ],
+    "files": ["main.js", "preload.js", "renderer/**", "src/**", "assets/**"],
+    "extraResources": [{ "from": "build/runtime", "to": "." }],
+    "artifactName": "Arcway-${version}-${arch}.${ext}",
     "linux": {
       "target": ["AppImage", "deb"],
       "icon": "assets/icon.png",
       "category": "Utility",
-      "executableName": "arcway"
+      "executableName": "arcway-desktop",
+      "synopsis": "Run coding agents on this computer from your phone"
     },
     "deb": {
-      "maintainer": "Arcway <app@arcway.local>",
-      "depends": ["libsecret-1-0", "nodejs", "npm"]
+      "depends": ["tmux", "libgtk-3-0", "libnotify4", "libnss3", "libxss1", "libxtst6", "xdg-utils", "libatspi2.0-0", "libuuid1", "libsecret-1-0"]
     }
   }
 }

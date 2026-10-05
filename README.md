@@ -18,7 +18,7 @@ Full-disk-access UI is Mac-only (Linux has no TCC).
 ## Build
 
 ```bash
-./build.sh          # x64 → dist/Arcway-<version>-x86_64.AppImage + dist/Arcway-<version>-amd64.deb
+./build.sh          # x64 → dist/Arcway-x86_64.AppImage + dist/Arcway-amd64.deb
 ./build.sh arm64
 ```
 

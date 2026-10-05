@@ -1,7 +1,7 @@
 {
   "name": "arcway-desktop",
   "productName": "Arcway",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "Arcway desktop agent: run Claude, Codex, Copilot and Antigravity from your phone",
   "homepage": "https://github.com/karthik24iyer/arcway-relay-server",
   "author": "Arcway <app@arcway.local>",
@@ -20,7 +20,7 @@
     "productName": "Arcway",
     "files": ["main.js", "preload.js", "renderer/**", "src/**", "assets/**"],
     "extraResources": [{ "from": "build/runtime", "to": "." }],
-    "artifactName": "Arcway-${version}-${arch}.${ext}",
+    "artifactName": "Arcway-${arch}.${ext}",
     "linux": {
       "target": ["AppImage", "deb"],
       "icon": "assets/icon.png",

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds dist/Arcway-<version>-<arch>.{AppImage,deb} inside Docker, so node-pty
+# Builds dist/Arcway-<arch>.{AppImage,deb} inside Docker, so node-pty
 # compiles for Linux even when run from a Mac. Needs Docker and ../arcway-backend.
 # Usage: ./build.sh [x64|arm64]
 set -euo pipefail

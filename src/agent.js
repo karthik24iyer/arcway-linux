@@ -1,4 +1,5 @@
 // Port of arcway-mac AgentService: runs the bundled arcway-backend and maps its STATUS: lines to app state.
+const { net } = require('electron');
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -13,6 +14,7 @@ let stopped = false;
 let generation = 0;
 let watchdog = null;
 let watchdogFallback = 'loggedOut';
+let offlinePoll = null;
 let getState = () => ({});
 let setState = () => {};
 
@@ -69,8 +71,24 @@ function armWatchdog() {
     if (getState().type === 'connecting') {
       stop();
       setState({ type: fallback });
+      if (fallback === 'networkOffline') pollWhileOffline();
     }
   }, 15000);
+}
+
+// Offline: probe the relay every 10s and reconnect on its own once it answers (any HTTP
+// response will do), instead of waiting for Retry. Stops itself once we leave `networkOffline`.
+function pollWhileOffline() {
+  clearInterval(offlinePoll);
+  offlinePoll = setInterval(() => {
+    if (getState().type !== 'networkOffline') return clearInterval(offlinePoll);
+    net.fetch(relayUrl(), { method: 'HEAD', signal: AbortSignal.timeout(5000) }).then(() => {
+      if (getState().type !== 'networkOffline') return;
+      clearInterval(offlinePoll);
+      setState({ type: 'connecting' });
+      start('networkOffline');
+    }, () => {});
+  }, 10000);
 }
 
 function cancelWatchdog() {

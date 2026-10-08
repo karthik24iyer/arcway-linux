@@ -13,6 +13,14 @@ const RELEASES_API = 'https://api.github.com/repos/karthik24iyer/arcway-relay-se
 const WIDTH = 272; // Mac popover: 240 content + 16 padding each side
 
 if (!app.requestSingleInstanceLock()) app.exit(0);
+// Wayland ignores app-chosen window positions (GNOME centers the popover), so run via XWayland.
+// The platform is fixed before this script runs, hence a relaunch. After the lock, so OAuth
+// callback launches still hand their URL to the running instance.
+else if (process.env.XDG_SESSION_TYPE === 'wayland' && !app.commandLine.hasSwitch('ozone-platform')) {
+  // AppImage: the mount vanishes when we exit, so relaunch the .AppImage itself.
+  app.relaunch({ execPath: process.env.APPIMAGE || process.execPath, args: [...process.argv.slice(1), '--ozone-platform=x11'] });
+  app.exit(0);
+}
 
 let win, tray;
 let keepAwakeId = null;
@@ -108,15 +116,16 @@ function positionWindow() {
   const cursor = screen.getCursorScreenPoint();
   const { workArea } = screen.getDisplayNearestPoint(cursor);
   const [w, h] = win.getSize();
-  // Wayland reports the cursor at 0,0: anchor top-right, where most panels keep the tray.
-  let x = workArea.x + workArea.width - w - 8;
-  let y = workArea.y + 8;
-  if (cursor.x || cursor.y) {
+  const gap = 4;
+  // Like NSPopover under the status item: when the click came from a panel (cursor outside the
+  // work area), drop down/up from it under the cursor; otherwise anchor top-right under the panel.
+  let x = workArea.x + workArea.width - w - gap;
+  let y = workArea.y + gap;
+  if (cursor.y < workArea.y || cursor.y >= workArea.y + workArea.height) {
     x = cursor.x - Math.round(w / 2);
-    y = cursor.y > workArea.y + workArea.height / 2 ? cursor.y - h - 10 : cursor.y + 10;
+    if (cursor.y >= workArea.y + workArea.height) y = workArea.y + workArea.height - h - gap;
   }
   x = Math.max(workArea.x, Math.min(x, workArea.x + workArea.width - w));
-  y = Math.max(workArea.y, Math.min(y, workArea.y + workArea.height - h));
   win.setPosition(x, y);
 }
 
@@ -124,6 +133,7 @@ function togglePopover() {
   if (win.isVisible()) return win.hide();
   positionWindow();
   win.show();
+  positionWindow(); // some window managers re-place a window when it is first mapped
   win.focus();
   win.webContents.send('shown');
 }
